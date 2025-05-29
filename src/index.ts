@@ -1,17 +1,26 @@
 import 'dotenv/config';
 import { JSONFile, Low } from '@commonify/lowdb';
-import { createPublicClient, createTestClient, formatEther, Hex, http, parseEther } from 'viem';
+import { type Address, createPublicClient, createTestClient, formatEther, Hex, http, parseEther } from 'viem';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { getBalance } from 'viem/actions';
-import { toSafeSmartAccount } from 'permissionless/accounts';
+import { toSafeSmartAccount, toSimpleSmartAccount } from 'permissionless/accounts';
 import { createPimlicoClient } from 'permissionless/clients/pimlico';
-import { entryPoint07Address } from 'viem/account-abstraction';
+import { entryPoint07Address, entryPoint08Address, SmartAccount } from 'viem/account-abstraction';
 import { foundry } from 'viem/chains';
 import { createSmartAccountClient } from 'permissionless';
 
 const RPC_TRANSPORT = http('http://localhost:8545');
 const PAYMASTER_TRANSPORT = http('http://localhost:3000');
 const BUNDLER_TRANSPORT = http('http://localhost:4337');
+
+const ENTRY_POINT_07: any = { address: entryPoint07Address, version: '0.7' };
+const ENTRY_POINT_08: any = { address: entryPoint08Address, version: '0.8' };
+
+const ENTRY_POINT = ENTRY_POINT_07;
+const useSafeSmartAccountType = true;
+
+console.log(`Entry point: ${ENTRY_POINT.address} (${ENTRY_POINT.version})`);
+console.log(`Smart Account type: ${useSafeSmartAccountType ? 'SafeSmartAccount' : 'SimpleSmartAccount'}`);
 
 const publicClient = createPublicClient({
   chain: foundry,
@@ -20,10 +29,7 @@ const publicClient = createPublicClient({
 
 const paymasterClient = createPimlicoClient({
   transport: PAYMASTER_TRANSPORT,
-  entryPoint: {
-    address: entryPoint07Address,
-    version: '0.7',
-  },
+  entryPoint: ENTRY_POINT,
 });
 
 // Funds a SA account with a specified amount of ETH for testing purposes.
@@ -54,34 +60,54 @@ const fundSAAccount = async (saAddress: `0x${string}`, amount: bigint) => {
  *
  */
 const initSmartAccountClient = async () => {
-  const cache = new Low<{ scwAddress: Hex; address: Hex; pk: Hex }>(new JSONFile(`${process.cwd()}/.cache.json`));
+  const cache = new Low<{ saAddress: Hex; address: Hex; pk: Hex }>(new JSONFile(`${process.cwd()}/.cache.json`));
   await cache.read();
 
   const privKeyHex = cache.data?.pk ?? (generatePrivateKey() as Hex);
 
-  // Generate EOA from private key using ethers.js
+  // Generate EOA from a private key using ethers.js
   const owner = privateKeyToAccount(privKeyHex);
 
-  const safeAccount = await toSafeSmartAccount({
-    client: publicClient,
-    owners: [owner],
-    entryPoint: {
-      address: entryPoint07Address,
-      version: '0.7',
-    }, // global entrypoint
-    version: '1.4.1',
-  });
+  let smartAccount: SmartAccount;
+  if (useSafeSmartAccountType) {
+    /**
+     * Safe Smart Account supports EntryPoint to 0.7
+     * https://docs.pimlico.io/guides/how-to/accounts/comparison#1-safe
+     * - Support: ERC-7579, Passkeys, Multiple Signers
+     * - Audited by Various
+     * - Gas Efficiency: Creation (401848), Native transfer (115469), ERC20 transfer (105089), Total (622406)
+     */
+    if (ENTRY_POINT.version === '0.8') throw new Error('Safe Smart Account does not support 0.8');
+    smartAccount = await toSafeSmartAccount({
+      client: publicClient,
+      owners: [owner],
+      entryPoint: ENTRY_POINT,
+      version: '1.4.1',
+    });
+  } else {
+    /**
+     * Simple Smart Account supports EntryPoint to 0.8
+     * https://docs.pimlico.io/guides/how-to/accounts/comparison#4-simple-smart-account
+     * - Audited by OpenZeppelin
+     * - Gas Efficiency: Creation (383218), Native transfer (101319), ERC20 transfer (90907), Total (575444)
+     */
+    smartAccount = await toSimpleSmartAccount({
+      client: publicClient,
+      owner: owner,
+      entryPoint: ENTRY_POINT_08,
+    });
+  }
 
-  const smartAccount = safeAccount.address;
+  const saAddress = smartAccount.address;
   console.log('EOA Wallet:', owner.address);
-  console.log('Smart Account (SA):', smartAccount);
+  console.log('Smart Account (SA):', saAddress);
 
   console.log('EOA balance:', formatEther(await getBalance(publicClient, { address: owner.address })));
-  console.log(' SA balance:', formatEther(await getBalance(publicClient, { address: smartAccount })));
+  console.log(' SA balance:', formatEther(await getBalance(publicClient, { address: saAddress })));
 
   if (!cache.data) {
     cache.data = {
-      scwAddress: smartAccount,
+      saAddress: saAddress,
       address: owner.address,
       pk: privKeyHex,
     };
@@ -89,7 +115,7 @@ const initSmartAccountClient = async () => {
   }
 
   return createSmartAccountClient({
-    account: safeAccount,
+    account: smartAccount,
     chain: foundry,
     paymaster: paymasterClient,
     bundlerTransport: BUNDLER_TRANSPORT,
@@ -131,16 +157,3 @@ processScript()
     process.exit(0);
   })
   .catch((error) => console.error(error));
-
-/**
- * EOA Wallet: 0x3D7d317105b372F50f4771Cce48D78bbC0069C3C
- * Smart Account (SA): 0x86FA7E72E8D06D36c768Bd6176c45CCd22020e25
- * EOA balance: 0
- *  SA balance: 0
- * Funding 0.001 ETH for SA 0x86FA7E72E8D06D36c768Bd6176c45CCd22020e25, balance is now 0.001
- * Sending ETH from SA to 0x000000000000000000000000000000000000dead with amount 0.001
- * Tx hash: 0x3dee0dde2d846e117a87fffbdced142936a9f7f63477426a1ddd955e5d0677df
- * SA 0x86FA7E72E8D06D36c768Bd6176c45CCd22020e25 balance now is 0
- * TO 0x000000000000000000000000000000000000dead balance now is 0.001
- * DONE
- */
