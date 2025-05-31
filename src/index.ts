@@ -94,7 +94,7 @@ const initSmartAccountClient = async () => {
     smartAccount = await toSimpleSmartAccount({
       client: publicClient,
       owner: owner,
-      entryPoint: ENTRY_POINT_08,
+      entryPoint: ENTRY_POINT,
     });
   }
 
